@@ -215,7 +215,7 @@ EOF
             if ($param && '-' === $param[0]) {
                 $params[] = $param . ('' != $val ? '='.$escape($val) : '');
             } else {
-                $params[] = $escape($val);
+                $params[] = $val;
             }
         }
         if ($withEnv) {
