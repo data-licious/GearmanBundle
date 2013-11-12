@@ -6,7 +6,6 @@ use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Input\ArrayInput;
 use Symfony\Component\Process\ProcessBuilder;
-use Symfony\Component\Process\Process;
 use Symfony\Bundle\FrameworkBundle\Command\ContainerAwareCommand;
 use Symfony\Component\Finder\Finder;
 use Symfony\Component\HttpFoundation\ParameterBag;
@@ -16,7 +15,7 @@ use Supertag\Bundle\GearmanBundle\Event\JobEndEvent;
 use Supertag\Bundle\GearmanBundle\Workload;
 use GearmanWorker;
 use GearmanJob;
-use RuntimeException, ReflectionClass, ReflectionMethod;
+use RuntimeException, ReflectionClass;
 
 class RunWorkerCommand extends ContainerAwareCommand
 {
@@ -134,25 +133,16 @@ EOF
             $result = null;
             $hash = sha1($job->getName() . $gmj->workload());
             $lastOutput = $cmd = '';
-
             try {
                 $event = new JobBeginEvent($job, $gmj->workload());
                 $disp->dispatch(JobBeginEvent::NAME, $event);
-
-                $jobArgs = unserialize($gmj->workload());
-                $commandArgs = $self->prepareCommandArguments($jobArgs);
-                // will validate the input arguments and options
-                $input = new ArrayInput($jobArgs, $job->getDefinition());
-                // convert parameters to string, console v2.2 does not have to string conversion yet
-                // build job command
-                $processBuilder = $self->getCommandProcessBuilder()->add($job->getName());
-                array_walk($commandArgs, array($processBuilder, 'add'));
-                $process = $processBuilder->getProcess();
-                $cmd = $job->getName() . ' ' . implode(' ', $commandArgs);
-                $output->writeLn(date('Y-m-d H:i:s') . " -> Running job command: {$cmd}");
-
+                $process = $self->buildProcess($gmj, $job);
+                $cmd = trim(implode(' ',array_slice(explode("' '", $process->getCommandLine()),3)),"'");
+                $output->writeLn(
+                    date('Y-m-d H:i:s') . " -> Running job command: {$cmd}"
+                );
                 // output read callback
-                $cb = function($type, $text) use($output, &$lastOutput) {
+                $cb = function ($type, $text) use ($output, &$lastOutput) {
                     $output->writeLn($text);
                     $lastOutput .= $text;
                 };
@@ -192,8 +182,15 @@ EOF
         });
     }
 
-    public function getCommandProcessBuilder()
+    public function buildProcess(GearmanJob $gmj, GearmanJobCommandInterface $job)
     {
+        $jobArgs = unserialize($gmj->workload());
+        $input = new ArrayInput($jobArgs, $job->getDefinition());
+        $commandArgs = $this->prepareCommandArguments($jobArgs);
+
+        // will validate the input arguments and options
+        // convert parameters to string, console v2.2 does not have to string conversion yet
+        // build job command
         $pb = new ProcessBuilder();
 
         // PHP wraps the process in "sh -c" by default, but we need to control
@@ -202,20 +199,28 @@ EOF
             $pb->add('exec');
         }
 
-        return $pb->add('php')->add($this->getContainer()->getParameter('kernel.root_dir').'/console');
+        $pb
+            ->add('php')
+            ->add($this->getContainer()->getParameter('kernel.root_dir').'/console')
+            ->add($job->getName())
+        ;
+
+        array_walk($commandArgs, array($pb, 'add'));
+
+        return $pb->getProcess();
     }
 
     public function prepareCommandArguments(array $data, $withEnv = true)
     {
         $params = array();
-        $escape = function($token) {
-            return preg_match('{^[\w-]+$}', $token) ? $token : escapeshellarg($token);
+        $escape = function($value) {
+            return preg_match('{^[\w-]+$}', $value) ? $value : sprintf('"%s"', $value);
         };
         foreach ($data as $param => $val) {
             if ($param && '-' === $param[0]) {
                 $params[] = $param . ('' != $val ? '='.$escape($val) : '');
             } else {
-                $params[] = $escape($val);
+                $params[] = $val;
             }
         }
         if ($withEnv) {
@@ -224,6 +229,7 @@ EOF
                 $params[] = '--verbose';
             }
         }
+
         return $params;
     }
 }
